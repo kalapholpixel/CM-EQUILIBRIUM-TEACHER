@@ -10,6 +10,8 @@ The owner starts and commands the bot.
 import os
 import json
 import logging
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import Dict, Any, List, Optional
 from telegram import (
     Update,
@@ -995,6 +997,36 @@ async def post_init(application: Application):
 
     logger.info(f"{BOT_NAME} is fully online and active in place of the teacher!")
 
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    """Simple HTTP handler to satisfy cloud hosting health checks (Hugging Face Spaces, Render, etc.)."""
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/html; charset=utf-8")
+        self.end_headers()
+        html = (
+            "<!DOCTYPE html><html><head><title>Candlemaster AI Teacher</title></head>"
+            "<body style='font-family: Arial, sans-serif; text-align: center; padding-top: 60px; background: #0f172a; color: #f8fafc;'>"
+            "<h1>Candlemaster Academy Bot</h1>"
+            "<p style='color: #4ade80; font-size: 22px; font-weight: bold;'>&#9679; Status: Online and Active 24/7</p>"
+            "<p style='color: #94a3b8;'>Running on behalf of Coach Prince</p>"
+            "</body></html>"
+        )
+        self.wfile.write(html.encode("utf-8"))
+
+    def log_message(self, format, *args):
+        pass  # Suppress standard HTTP request logging in console
+
+def start_health_check_server():
+    """Starts a lightweight HTTP server on the port specified by PORT env var (default 7860 for Hugging Face)."""
+    port = int(os.getenv("PORT", 7860))
+    try:
+        server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        logger.info(f"Health-check web server listening on port {port}")
+    except Exception as e:
+        logger.warning(f"Could not start health check web server on port {port}: {e}")
+
 def main():
     if not BOT_TOKEN:
         print("ERROR: BOT_TOKEN is missing! Please set it in your .env file.")
@@ -1043,6 +1075,9 @@ def main():
 
     # 24/7 Discussion Group & Question Listener
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_incoming_message))
+
+    # Start lightweight health-check HTTP server (for Hugging Face Spaces / Render Web Services)
+    start_health_check_server()
 
     # Run bot
     print(f"Starting {BOT_NAME} on behalf of the teacher...")
