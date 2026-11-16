@@ -1,0 +1,23 @@
+services:
+  - type: worker
+    name: candlemaster-academy-bot
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    autoDeploy: true
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: LESSONS_CHANNEL_ID
+        value: "@ForexLessonsGH"
+      - key: ASSIGNMENTS_CHANNEL_ID
+        value: "@ForexAssignmentsGH"
+      - key: DISCUSSION_GROUP_ID
+        sync: false
+      - key: ADMIN_IDS
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: TIMEZONE
+        value: "Africa/Accra"
+

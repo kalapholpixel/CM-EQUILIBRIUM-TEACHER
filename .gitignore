@@ -1,0 +1,17 @@
+# Environment variables
+.env
+
+# SQLite database
+*.db
+*.sqlite3
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+
+# Generated chart caches
+generated_charts/certificate_*.png
+
