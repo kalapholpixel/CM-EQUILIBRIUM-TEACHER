@@ -3,6 +3,7 @@ Database management module for Forex Beginners GH.
 Uses SQLite with thread-safe async helper methods.
 """
 
+import os
 import sqlite3
 import asyncio
 from datetime import datetime
@@ -112,8 +113,15 @@ class Database:
                     )
                 """)
 
-                # Set default state if empty
-                cursor.execute("INSERT OR IGNORE INTO bot_state (key, value) VALUES ('current_day', '1')")
+                # Set initial state if empty or respect CURRENT_DAY environment variable
+                env_day = os.getenv("CURRENT_DAY", "").strip()
+                if env_day.isdigit() and 1 <= int(env_day) <= 14:
+                    cursor.execute("""
+                        INSERT INTO bot_state (key, value) VALUES ('current_day', ?)
+                        ON CONFLICT(key) DO UPDATE SET value = ?
+                    """, (env_day, env_day))
+                else:
+                    cursor.execute("INSERT OR IGNORE INTO bot_state (key, value) VALUES ('current_day', '1')")
                 cursor.execute("INSERT OR IGNORE INTO bot_state (key, value) VALUES ('auto_post_paused', '0')")
                 conn.commit()
 
