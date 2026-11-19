@@ -7,6 +7,7 @@ and intelligent fallback research.
 import os
 import json
 import logging
+import asyncio
 from typing import Dict, Any, Optional, Tuple
 from config import GEMINI_API_KEY, OPENAI_API_KEY, BOT_NAME, DISCLAIMER_TEXT
 
@@ -262,9 +263,9 @@ class AITeacher:
                     "Use a totally different, ultra-simple Ghanaian analogy (like buying trotro fuel, sending MoMo with e-levy, or selling fried plantain). "
                     "Keep it short and finish with: 'Does this new example make it clearer for you? Reply YES or NO.'"
                 )
-                res = self.gemini.generate_content(prompt)
+                res = await asyncio.to_thread(self.gemini.generate_content, prompt)
                 if res and res.text:
-                    return f"@{clean_name}, don't worry at all! A good teacher never tires of explaining.\n\n" + res.text
+                    return f"@{clean_name}, don't worry at all! A good teacher never tires of explaining.\n\n" + res.text.strip()
             except Exception as e:
                 logger.warning(f"Gemini re-explain error: {e}")
 
@@ -280,36 +281,39 @@ class AITeacher:
         )
 
     async def _generate_ai_response(self, user_name: str, question: str, previous_context: Optional[str]) -> Optional[str]:
-        """Calls Gemini or OpenAI to synthesize a human-like response."""
+        """Calls Gemini or OpenAI to synthesize a human-like response asynchronously."""
         user_prompt = f"Student Name: @{user_name}\nStudent Question: {question}\n"
         if previous_context:
             user_prompt += f"Recent Chat Context: {previous_context}\n"
 
-        # Try Gemini
+        # Try Gemini (non-blocking)
         if self.gemini:
             try:
                 full_prompt = f"{COACH_PRINCE_SYSTEM_PROMPT}\n\n{user_prompt}"
-                response = self.gemini.generate_content(full_prompt)
+                response = await asyncio.to_thread(self.gemini.generate_content, full_prompt)
                 if response and response.text:
                     return response.text.strip()
             except Exception as e:
                 logger.warning(f"Gemini generation error: {e}")
 
-        # Try OpenAI
+        # Try OpenAI (non-blocking)
         if self.openai:
             try:
-                completion = self.openai.chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=[
-                        {"role": "system", "content": COACH_PRINCE_SYSTEM_PROMPT},
-                        {"role": "user", "content": user_prompt}
-                    ],
-                    temperature=0.7,
-                    max_tokens=600
-                )
-                text = completion.choices[0].message.content
-                if text:
-                    return text.strip()
+                def _call_openai():
+                    return self.openai.chat.completions.create(
+                        model="gpt-4o-mini",
+                        messages=[
+                            {"role": "system", "content": COACH_PRINCE_SYSTEM_PROMPT},
+                            {"role": "user", "content": user_prompt}
+                        ],
+                        temperature=0.7,
+                        max_tokens=600
+                    )
+                completion = await asyncio.to_thread(_call_openai)
+                if completion and completion.choices:
+                    text = completion.choices[0].message.content
+                    if text:
+                        return text.strip()
             except Exception as e:
                 logger.warning(f"OpenAI generation error: {e}")
 

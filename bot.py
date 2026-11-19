@@ -11,6 +11,7 @@ import os
 import json
 import logging
 import threading
+from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import Dict, Any, List, Optional
 from telegram import (
@@ -21,6 +22,7 @@ from telegram import (
     PollAnswer,
     PreCheckoutQuery
 )
+from telegram.constants import ChatAction
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -40,7 +42,8 @@ from config import (
     ADMIN_IDS,
     BOT_NAME,
     PROJECT_NAME,
-    DISCLAIMER_TEXT
+    DISCLAIMER_TEXT,
+    DB_PATH
 )
 from database import db
 from ai_teacher import ai_teacher
@@ -63,28 +66,59 @@ def is_admin(user_id: int) -> bool:
         return True  # If no admin IDs are explicitly set, the user running the command is treated as owner
     return user_id in ADMIN_IDS
 
+def split_message_text(text: str, max_length: int = 4000) -> List[str]:
+    """Splits long text into chunks under max_length at paragraph/newline breaks."""
+    if len(text) <= max_length:
+        return [text]
+
+    chunks = []
+    lines = text.split("\n")
+    current_chunk = ""
+
+    for line in lines:
+        if len(current_chunk) + len(line) + 1 <= max_length:
+            current_chunk = f"{current_chunk}\n{line}" if current_chunk else line
+        else:
+            if current_chunk:
+                chunks.append(current_chunk)
+            if len(line) > max_length:
+                for i in range(0, len(line), max_length):
+                    chunks.append(line[i:i + max_length])
+                current_chunk = ""
+            else:
+                current_chunk = line
+    if current_chunk:
+        chunks.append(current_chunk)
+    return chunks
+
 async def send_safe_message(bot, chat_id: Any, text: str, reply_markup=None, parse_mode: str = "Markdown", disable_web_page_preview: bool = True):
     """
-    Safely sends a message. If Markdown parsing fails due to unescaped symbols,
-    gracefully falls back to plain text so messages are NEVER lost.
+    Safely sends a message. Automatically chunks messages exceeding 4000 characters
+    and gracefully falls back to plain text if Markdown parsing fails.
     """
-    try:
-        return await bot.send_message(
-            chat_id=chat_id,
-            text=text,
-            parse_mode=parse_mode,
-            reply_markup=reply_markup,
-            disable_web_page_preview=disable_web_page_preview
-        )
-    except Exception as e:
-        logger.warning(f"send_safe_message: Markdown parse failed ({e}), falling back to plain text.")
-        plain = text.replace('*', '').replace('_', '').replace('`', '')
-        return await bot.send_message(
-            chat_id=chat_id,
-            text=plain,
-            reply_markup=reply_markup,
-            disable_web_page_preview=disable_web_page_preview
-        )
+    chunks = split_message_text(text, 4000)
+    last_msg = None
+    for i, chunk in enumerate(chunks):
+        is_last = (i == len(chunks) - 1)
+        markup = reply_markup if is_last else None
+        try:
+            last_msg = await bot.send_message(
+                chat_id=chat_id,
+                text=chunk,
+                parse_mode=parse_mode,
+                reply_markup=markup,
+                disable_web_page_preview=disable_web_page_preview
+            )
+        except Exception as e:
+            logger.warning(f"send_safe_message: Markdown parse failed ({e}), falling back to plain text.")
+            plain = chunk.replace('*', '').replace('_', '').replace('`', '')
+            last_msg = await bot.send_message(
+                chat_id=chat_id,
+                text=plain,
+                reply_markup=markup,
+                disable_web_page_preview=disable_web_page_preview
+            )
+    return last_msg
 
 # ==============================================================================
 # OWNER / TEACHER COMMANDS (CONTROL PANEL)
@@ -141,6 +175,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"• `/strategy` - View Coach Prince's Ultimate Strategy Masterclass\n"
             f"• `/vip_list` - View students who paid 200 Stars\n"
             f"• `/grant_vip [user_id]` - Manually unlock strategy for someone\n"
+            f"• `/backup_db` - Download latest database file backup\n"
             f"• `/status` - Live operational & revenue status\n\n"
             f"👇 *Or use 1-Tap Control Buttons below:*"
         )
@@ -155,7 +190,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ],
             [
                 InlineKeyboardButton("⏸️/▶️ Toggle Pause", callback_data="owner_toggle_pause"),
-                InlineKeyboardButton("👑 My Strategy Blueprint", callback_data="owner_view_strategy")
+                InlineKeyboardButton("👑 Strategy Blueprint", callback_data="owner_view_strategy")
+            ],
+            [
+                InlineKeyboardButton("📦 Download Database Backup", callback_data="owner_backup_db")
             ]
         ])
         await send_safe_message(context.bot, chat.id, owner_panel, reply_markup=keyboard)
@@ -411,6 +449,10 @@ async def handle_incoming_message(update: Update, context: ContextTypes.DEFAULT_
         latest_q = await db.get_latest_question_for_user(user.id)
         if latest_q:
             await db.update_question_understanding(latest_q["id"], understood=False)
+        try:
+            await context.bot.send_chat_action(chat_id=chat.id, action=ChatAction.TYPING)
+        except Exception:
+            pass
         re_explanation = await ai_teacher.re_explain(user_name, original_question=latest_q["question_text"] if latest_q else None)
         await send_safe_message(context.bot, chat.id, re_explanation)
         return
@@ -445,6 +487,10 @@ async def handle_incoming_message(update: Update, context: ContextTypes.DEFAULT_
 
     # 3. Answer with 3-Step Human Teaching Loop
     clean_query = text.replace(f"@{bot_username}", "").strip()
+    try:
+        await context.bot.send_chat_action(chat_id=chat.id, action=ChatAction.TYPING)
+    except Exception:
+        pass
     response_text, topic = await ai_teacher.answer_question(user_name, clean_query)
 
     # Log into database to track difficult topics
@@ -846,6 +892,33 @@ async def admin_vip_list_command(update: Update, context: ContextTypes.DEFAULT_T
         msg += f"• `{v['user_id']}` | {name} ({uname}) | {v.get('amount_stars', 200)}★ | {dt}\n"
     await send_safe_message(context.bot, update.effective_chat.id, msg)
 
+async def admin_backup_db_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Owner command: /backup_db - Sends the SQLite database file directly in private chat."""
+    user = update.effective_user
+    chat = update.effective_chat
+    if not is_admin(user.id):
+        return
+
+    if not os.path.exists(DB_PATH):
+        await update.message.reply_text("❌ Database file not found on disk.")
+        return
+
+    try:
+        await context.bot.send_chat_action(chat_id=chat.id, action=ChatAction.UPLOAD_DOCUMENT)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        with open(DB_PATH, "rb") as db_file:
+            await context.bot.send_document(
+                chat_id=chat.id,
+                document=db_file,
+                filename=f"forex_teacher_{timestamp}.db",
+                caption=f"📦 *Candlemaster Academy Database Backup*\n📅 Timestamp: `{timestamp}`\nKeep this file safe!",
+                parse_mode="Markdown"
+            )
+        logger.info(f"Database backup sent to admin {user.id}")
+    except Exception as e:
+        logger.error(f"Error sending database backup: {e}")
+        await update.message.reply_text(f"❌ Failed to backup database: {e}")
+
 async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles inline keyboard button clicks."""
     query = update.callback_query
@@ -877,6 +950,10 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         latest_q = await db.get_latest_question_for_user(user.id)
         if latest_q:
             await db.update_question_understanding(latest_q["id"], understood=False)
+        try:
+            await context.bot.send_chat_action(chat_id=chat.id, action=ChatAction.TYPING)
+        except Exception:
+            pass
         re_explanation = await ai_teacher.re_explain(user.first_name, original_question=latest_q["question_text"] if latest_q else None)
         await send_safe_message(context.bot, chat.id, re_explanation)
         return
@@ -904,6 +981,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             await admin_status_command(update, context)
         elif data == "owner_vip_list":
             await admin_vip_list_command(update, context)
+        elif data == "owner_backup_db":
+            await admin_backup_db_command(update, context)
         elif data == "owner_toggle_pause":
             paused = await db.get_state("auto_post_paused", "0")
             new_state = "0" if paused == "1" else "1"
@@ -998,7 +1077,7 @@ async def post_init(application: Application):
     logger.info(f"{BOT_NAME} is fully online and active in place of the teacher!")
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
-    """Simple HTTP handler to satisfy cloud hosting health checks (Hugging Face Spaces, Render, etc.)."""
+    """Simple HTTP handler to satisfy cloud hosting health checks (Hugging Face Spaces, Render, UptimeRobot, etc.)."""
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-type", "text/html; charset=utf-8")
@@ -1012,6 +1091,12 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
             "</body></html>"
         )
         self.wfile.write(html.encode("utf-8"))
+
+    def do_HEAD(self):
+        """Responds to uptime monitoring services (like UptimeRobot) that use HEAD requests."""
+        self.send_response(200)
+        self.send_header("Content-type", "text/html; charset=utf-8")
+        self.end_headers()
 
     def log_message(self, format, *args):
         pass  # Suppress standard HTTP request logging in console
@@ -1049,6 +1134,8 @@ def main():
     application.add_handler(CommandHandler("grant_vip", admin_grant_vip_command))
     application.add_handler(CommandHandler("vip_list", admin_vip_list_command))
     application.add_handler(CommandHandler("submissions", admin_submissions_command))
+    application.add_handler(CommandHandler("backup_db", admin_backup_db_command))
+    application.add_handler(CommandHandler("export_db", admin_backup_db_command))
 
     # Student & Masterclass commands
     application.add_handler(CommandHandler("help", help_command))

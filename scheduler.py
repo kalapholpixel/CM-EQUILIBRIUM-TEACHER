@@ -8,6 +8,7 @@ The bot acts completely on behalf of the teacher/owner.
 import json
 import logging
 from datetime import datetime
+from typing import Any
 import pytz
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -51,6 +52,49 @@ class BotScheduler:
         day_clamped = max(1, min(14, day))
         await db.set_state("current_day", str(day_clamped))
 
+    async def send_safe_message(self, chat_id: Any, text: str, reply_markup=None, parse_mode: str = "Markdown", disable_web_page_preview: bool = True):
+        """
+        Safely sends broadcast messages. Splits texts exceeding Telegram's 4000 character limit
+        and gracefully falls back to plain text if Markdown parsing encounters formatting issues.
+        """
+        max_chunk = 4000
+        chunks = []
+        if len(text) <= max_chunk:
+            chunks = [text]
+        else:
+            lines = text.split("\n")
+            current = ""
+            for line in lines:
+                if len(current) + len(line) + 1 <= max_chunk:
+                    current = f"{current}\n{line}" if current else line
+                else:
+                    if current:
+                        chunks.append(current)
+                    current = line
+            if current:
+                chunks.append(current)
+
+        for i, chunk in enumerate(chunks):
+            is_last = (i == len(chunks) - 1)
+            markup = reply_markup if is_last else None
+            try:
+                await self.bot.send_message(
+                    chat_id=chat_id,
+                    text=chunk,
+                    parse_mode=parse_mode,
+                    reply_markup=markup,
+                    disable_web_page_preview=disable_web_page_preview
+                )
+            except Exception as e:
+                logger.warning(f"send_safe_message (scheduler): Markdown parse failed ({e}), falling back to plain text.")
+                plain = chunk.replace('*', '').replace('_', '').replace('`', '')
+                await self.bot.send_message(
+                    chat_id=chat_id,
+                    text=plain,
+                    reply_markup=markup,
+                    disable_web_page_preview=disable_web_page_preview
+                )
+
     # ---------------- 9:00 AM Teaser Broadcast ---------------- #
     async def post_morning_teaser(self, force_day: int = None):
         """09:00 GMT: Posts morning teaser to Lessons Channel (Channel 1)."""
@@ -72,7 +116,7 @@ class BotScheduler:
         )
 
         try:
-            await self.bot.send_message(
+            await self.send_safe_message(
                 chat_id=LESSONS_CHANNEL_ID,
                 text=teaser_msg,
                 parse_mode="Markdown"
@@ -143,7 +187,7 @@ class BotScheduler:
                 logger.warning(f"Could not construct Day 14 inline buttons: {e}")
 
         try:
-            await self.bot.send_message(
+            await self.send_safe_message(
                 chat_id=LESSONS_CHANNEL_ID,
                 text=full_text,
                 parse_mode="Markdown",
@@ -170,7 +214,7 @@ class BotScheduler:
 
         # Introductory banner
         try:
-            await self.bot.send_message(
+            await self.send_safe_message(
                 chat_id=chat,
                 text=f"🧠 *DAY {day} FLASH QUIZ (3 QUESTIONS)*\n"
                      f"Test your understanding of today's lesson below. Tap your answer to see instant feedback!",
@@ -227,7 +271,7 @@ class BotScheduler:
         )
 
         try:
-            await self.bot.send_message(
+            await self.send_safe_message(
                 chat_id=ASSIGNMENTS_CHANNEL_ID,
                 text=assign_msg,
                 parse_mode="Markdown"
@@ -255,7 +299,7 @@ class BotScheduler:
         )
 
         try:
-            await self.bot.send_message(
+            await self.send_safe_message(
                 chat_id=ASSIGNMENTS_CHANNEL_ID,
                 text=reminder_text,
                 parse_mode="Markdown"
@@ -285,7 +329,7 @@ class BotScheduler:
         )
 
         try:
-            await self.bot.send_message(
+            await self.send_safe_message(
                 chat_id=ASSIGNMENTS_CHANNEL_ID,
                 text=correction_text,
                 parse_mode="Markdown"
